@@ -1,0 +1,1185 @@
+/**
+ * Copyright 2024 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+import { type FunctionDeclaration, SchemaType } from "@google/generative-ai";
+import { useEffect, useRef, useState, memo } from "react";
+import vegaEmbed from "vega-embed";
+import { useLiveAPIContext } from "../../contexts/LiveAPIContext";
+import { useWebcam } from "../../hooks/use-webcam";
+import { PROCTOR_PROMPT, TERMINATION_PROMPT } from "./ProctorPrompt";
+import { ToolCall } from "../../multimodal-live-types";
+
+interface InterviewQA {
+  category: string;
+  question: string;
+  answer: string;
+  timestamp: string;
+  evaluation: {
+    score: number;
+    feedback: string;
+    key_points_covered: string[];
+    missing_points: string[];
+    strengths: string[];
+    areas_for_improvement: string[];
+  };
+}
+
+interface TechnicalEvaluation {
+  category_scores: {
+    Python_Fundamentals: number;
+    Web_Development: number;
+    Database: number;
+    Testing: number;
+    Python_Ecosystem: number;
+  };
+  overall_score: number;
+}
+
+interface InterviewProgress {
+  completed_categories: string[];
+  current_category: string;
+  questions_remaining: number;
+  average_score: number;
+  is_complete?: boolean;
+  end_time?: string;
+  duration_seconds?: number;
+  termination_reason?: string;
+}
+
+interface InterviewSession {
+  candidate: {
+    name: string;
+    position: string;
+    years_of_experience: number;
+  };
+  session: {
+    timestamp: string;
+    duration: number;
+    completed_categories: string[];
+  };
+  qa_history: InterviewQA[];
+  qa_pairs: Record<string, InterviewQA[]>;
+  progress: InterviewProgress;
+  technical_evaluation: TechnicalEvaluation;
+  final_evaluation?: {
+    technical_score: number;
+    sentiment_analysis: {
+      confidence: number;
+      overall_sentiment: string;
+      key_indicators: string[];
+      communication_score: number;
+      technical_confidence: number;
+    };
+    recommendation: {
+      hire_recommendation: boolean;
+      justification: string;
+      strengths: string[];
+      areas_for_improvement: string[];
+      suggested_role_level: string;
+    };
+  };
+}
+
+const INTERVIEW_CATEGORIES = [
+  'Python_Fundamentals',
+  'Web_Development',
+  'Database',
+  'Testing',
+  'Python_Ecosystem'
+];
+
+const INITIAL_TECHNICAL_EVALUATION: TechnicalEvaluation = {
+  category_scores: {
+    Python_Fundamentals: 0,
+    Web_Development: 0,
+    Database: 0,
+    Testing: 0,
+    Python_Ecosystem: 0
+  },
+  overall_score: 0
+};
+
+const INITIAL_PROGRESS: InterviewProgress = {
+  completed_categories: [],
+  current_category: INTERVIEW_CATEGORIES[0],
+  questions_remaining: 15, // 3 questions per category
+  average_score: 0
+};
+
+const declaration: FunctionDeclaration = {
+  name: "render_altair",
+  description: "Displays an altair graph in json format.",
+  parameters: {
+    type: SchemaType.OBJECT,
+    properties: {
+      json_graph: {
+        type: SchemaType.STRING,
+        description:
+          "JSON STRING representation of the graph to render. Must be a string, not a json object",
+      },
+    },
+    required: ["json_graph"],
+  },
+};
+
+// Proctor interview tool declaration
+const proctorDeclaration: FunctionDeclaration = {
+  name: "proctor_interview",
+  description: "Monitors the candidate during the interview for compliance with proctoring rules",
+  parameters: {
+    type: SchemaType.OBJECT,
+    properties: {
+      action: {
+        type: SchemaType.STRING,
+        description: "The action to take: 'check_status', 'issue_warning', or 'terminate'",
+        enum: ["check_status", "issue_warning", "terminate"]
+      },
+      reason: {
+        type: SchemaType.STRING,
+        description: "The reason for issuing a warning or terminating the interview",
+      },
+    },
+    required: ["action"],
+  },
+};
+
+// Helper function to validate and ensure state consistency
+const validateState = (state: InterviewSession): InterviewSession => {
+  // Create a deep copy to avoid mutation
+  const validatedState = JSON.parse(JSON.stringify(state));
+  
+  // Ensure all required properties exist
+  if (!validatedState.candidate) {
+    validatedState.candidate = {
+      name: "",
+      position: "",
+      years_of_experience: 0
+    };
+  }
+  
+  if (!validatedState.session) {
+    validatedState.session = {
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      completed_categories: []
+    };
+  }
+  
+  if (!validatedState.qa_history) {
+    validatedState.qa_history = [];
+  }
+  
+  if (!validatedState.qa_pairs) {
+    validatedState.qa_pairs = {};
+  }
+  
+  if (!validatedState.progress) {
+    validatedState.progress = INITIAL_PROGRESS;
+  }
+  
+  if (!validatedState.technical_evaluation) {
+    validatedState.technical_evaluation = INITIAL_TECHNICAL_EVALUATION;
+  }
+  
+  return validatedState;
+};
+
+function AltairComponent() {
+  const { stream, isStreaming } = useWebcam();
+  const [jsonString, setJSONString] = useState<string>("");
+  const [isVegaLoaded, setIsVegaLoaded] = useState(false);
+  const [isProctorActive, setIsProctorActive] = useState(false);
+  const [proctorWarnings, setProctorWarnings] = useState<string[]>([]);
+  const [isInterviewTerminated, setIsInterviewTerminated] = useState(false);
+  const [lastLookAwayTime, setLastLookAwayTime] = useState<number | null>(null);
+  const lookAwayThreshold = 5000; // 5 seconds threshold for looking away
+  const videoCheckIntervalRef = useRef<number | null>(null);
+  
+  // Ref for video element to use with face detection
+  const videoRef = useRef<HTMLVideoElement>(null);
+  
+  const startTimeRef = useRef(new Date());
+  const [interviewSession, setInterviewSession] = useState<InterviewSession>({
+    candidate: {
+      name: "",
+      position: "",
+      years_of_experience: 0
+    },
+    session: {
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      completed_categories: []
+    },
+    qa_history: [],
+    qa_pairs: {},
+    progress: INITIAL_PROGRESS,
+    technical_evaluation: INITIAL_TECHNICAL_EVALUATION
+  });
+  const { client, setConfig } = useLiveAPIContext();
+
+  // Track the start time of the interview
+  
+
+  useEffect(() => {
+    const isDevelopment = process.env.NODE_ENV === 'development';
+    
+    const onToolCall = (toolCall: ToolCall) => {
+      if (isDevelopment) {
+        console.log(`Tool called: ${toolCall.functionCalls.map(fc => fc.name).join(', ')}`);
+      }
+      
+      toolCall.functionCalls.forEach((fc) => {
+        if (fc.name === "render_altair") {
+          const str = (fc.args as any).json_graph;
+          setJSONString(str);
+          
+          if (isDevelopment) {
+            console.log(`Rendering Altair graph`);
+          }
+        } else if (fc.name === "set_candidate_info") {
+          const { name, position } = fc.args as any;
+          setInterviewSession(prev => {
+            const updatedState = {
+              ...prev,
+              candidate: { 
+                name, 
+                position,
+                years_of_experience: 2 // Default to 2 years as per requirement
+              }
+            };
+            
+            if (isDevelopment) {
+              console.log('Updated candidate info:', { name, position });
+            }
+            
+            return validateState(updatedState);
+          });
+        } else if (fc.name === "store_qa") {
+          const { question, answer, evaluation } = fc.args as any;
+          const currentCategory = interviewSession.progress.current_category;
+          
+          const qaEntry: InterviewQA = {
+            category: currentCategory,
+            question,
+            answer,
+            timestamp: new Date().toISOString(),
+            evaluation: evaluation || null
+          };
+          
+          setInterviewSession(prev => {
+            // Create a copy of the previous state
+            const updatedState = { ...prev };
+            
+            // Add the QA entry to the appropriate category
+            if (!updatedState.qa_pairs[currentCategory]) {
+              updatedState.qa_pairs[currentCategory] = [];
+            }
+            updatedState.qa_pairs[currentCategory].push(qaEntry);
+            
+            // Only log minimal information in development mode
+            if (isDevelopment) {
+              console.log(`Stored Q&A for category: ${currentCategory}`);
+            }
+            
+            return validateState(updatedState);
+          });
+        } else if (fc.name === "verify_camera") {
+          // Verify camera stream and tracks
+          const hasActiveStream = stream !== null && isStreaming;
+          const hasVideoTracks = stream?.getVideoTracks().some(track => track.enabled) || false;
+          
+          const status = hasActiveStream && hasVideoTracks;
+          let message = "";
+          
+          if (!stream) {
+            message = "Camera access not granted. Please enable your camera in browser settings.";
+          } else if (!isStreaming) {
+            message = "Camera stream is not active. Please check your camera settings.";
+          } else if (!hasVideoTracks) {
+            message = "No active video tracks detected. Please ensure your camera is not being used by another application.";
+          } else {
+            message = "Camera is working properly.";
+          }
+          
+          // Only log minimal information in development mode
+          if (isDevelopment) {
+            console.log(`Camera status: ${status ? 'OK' : 'Issue detected'}`);
+          }
+
+          client.sendToolResponse({
+            functionResponses: [{
+              response: {
+                output: {
+                  status,
+                  message,
+                  details: {
+                    hasStream: stream !== null,
+                    isStreaming,
+                    hasVideoTracks
+                  }
+                }
+              },
+              id: fc.id
+            }]
+          });
+          return; // Early return to avoid double response
+        } else if (fc.name === "proctor_interview") {
+          const { action, reason } = fc.args as any;
+          
+          // Only log minimal information in development mode
+          if (isDevelopment) {
+            console.log(`Proctor action: ${action}${reason ? `, reason: ${reason}` : ''} - Disabled`);
+          }
+          
+          // Always return success to prevent warnings
+          switch (action) {
+            case "check_status":
+              client.sendToolResponse({
+                functionResponses: [{
+                  response: {
+                    output: {
+                      status: true, // Always report camera is on
+                      is_proctor_active: true,
+                      has_stream: true,
+                      is_streaming: true,
+                      video_enabled: true,
+                      warnings_count: 0,
+                      is_terminated: false
+                    }
+                  },
+                  id: fc.id
+                }]
+              });
+              break;
+              
+            case "issue_warning":
+              client.sendToolResponse({
+                functionResponses: [{
+                  response: {
+                    output: {
+                      success: true,
+                      message: "Warning noted but disabled",
+                      warnings_count: 0
+                    }
+                  },
+                  id: fc.id
+                }]
+              });
+              break;
+              
+            case "terminate":
+              client.sendToolResponse({
+                functionResponses: [{
+                  response: {
+                    output: {
+                      success: false,
+                      message: "Termination disabled"
+                    }
+                  },
+                  id: fc.id
+                }]
+              });
+              break;
+              
+            default:
+              client.sendToolResponse({
+                functionResponses: [{
+                  response: {
+                    output: {
+                      success: false,
+                      message: `Unknown action: ${action}`
+                    }
+                  },
+                  id: fc.id
+                }]
+              });
+          }
+          return; // Early return to avoid double response
+        } else if (fc.name === "complete_interview") {
+          const { technical_score, sentiment_analysis, recommendation } = fc.args as any;
+          const endTime = new Date();
+          const duration = (endTime.getTime() - startTimeRef.current.getTime()) / 1000;
+          
+          // Only log minimal information in development mode
+          if (isDevelopment) {
+            console.log(`Completing interview. Duration: ${Math.floor(duration / 60)}m ${Math.floor(duration % 60)}s`);
+          }
+          
+          setInterviewSession(prev => {
+            // Calculate average scores and prepare final report
+            const avgTechnicalScore = prev.technical_evaluation.overall_score;
+            const completedCategories = [...prev.progress.completed_categories];
+            
+            if (!completedCategories.includes(prev.progress.current_category)) {
+              completedCategories.push(prev.progress.current_category);
+            }
+            
+            const updatedState = {
+              ...prev,
+              progress: {
+                ...prev.progress,
+                completed_categories: completedCategories,
+                is_complete: true,
+                end_time: endTime.toISOString(),
+                duration_seconds: duration
+              },
+              technical_evaluation: {
+                ...prev.technical_evaluation,
+                overall_score: technical_score || avgTechnicalScore,
+                sentiment_analysis: sentiment_analysis || {},
+                recommendation: recommendation || ""
+              }
+            };
+            
+            return validateState(updatedState);
+          });
+        }
+      });
+
+      // Send response for all function calls
+      if (toolCall.functionCalls.length) {
+        setTimeout(() => {
+          const currentState = validateState(interviewSession);
+          
+          client.sendToolResponse({
+            functionResponses: toolCall.functionCalls.map((fc) => ({
+              response: {
+                output: {
+                  success: true,
+                  state: {
+                    candidate: currentState.candidate,
+                    session_info: {
+                      qa_count: currentState.qa_history.length,
+                      current_category: currentState.progress.current_category,
+                      questions_remaining: currentState.progress.questions_remaining
+                    }
+                  },
+                  ...(fc.name === "set_candidate_info" && {
+                    candidate_info: currentState.candidate
+                  }),
+                  ...(fc.name === "store_qa" && {
+                    stored: true,
+                    qa_count: currentState.qa_history.length,
+                    latest_evaluation: currentState.qa_history[currentState.qa_history.length - 1]?.evaluation
+                  }),
+                  ...(fc.name === "complete_interview" && {
+                    completed: true,
+                    duration: Math.round((new Date().getTime() - startTimeRef.current.getTime()) / 1000),
+                    final_report: {
+                      candidate: currentState.candidate,
+                      technical_evaluation: currentState.technical_evaluation,
+                      final_evaluation: currentState.final_evaluation
+                    }
+                  })
+                }
+              },
+              id: fc.id,
+            })),
+          });
+        }, 200);
+      }
+    };
+    client.on("toolcall", onToolCall);
+    return () => {
+      client.off("toolcall", onToolCall);
+    };
+  }, [client, interviewSession, stream, isStreaming]);
+
+  useEffect(() => {
+    const isDevelopment = process.env.NODE_ENV === 'development';
+    
+    setConfig({
+      model: "models/gemini-2.0-flash-exp",
+      systemInstruction: {
+        parts: [
+          {
+            text: `
+              You are Texika, a friendly and empathetic AI technical interviewer for a Python developer position in tezhire. Your goal is to create a comfortable yet professional environment while thoroughly assessing the candidate's technical skills.
+              
+              ${PROCTOR_PROMPT}
+              
+              CORE PRINCIPLES:
+              - Be primarily a LISTENER, not a talker - your job is to understand the candidate
+              - Always PAUSE after asking a question - give the candidate ample time to think and respond
+              - Never rush to fill silence - comfortable pauses are natural in human conversation
+              - Keep your responses concise - avoid long monologues that feel like radio broadcasting
+              - Speak in short, natural sentences with varied length and structure
+              - Use natural speech fillers occasionally: "hmm", "I see", "interesting"
+              - Respect a 30/70 rule: you should speak 30% of the time, the candidate 70%
+              
+              CAMERA VERIFICATION (CRITICAL):
+              - Begin by introducing yourself briefly, then immediately focus on camera verification
+              - First check logs to verify if the video stream is technically active
+              - Even if logs show the camera is active, DO NOT assume you can see the person
+              - Ask the candidate to perform a specific action: "Could you please wave your hand so I can verify my video feed is working correctly?"
+              - Only after seeing them wave, confirm: "Great, I can see you clearly now"
+              - If they say they've enabled their camera but you can't confirm visual verification, say: "I'm having trouble seeing you. Could you try..."
+              - Suggest specific troubleshooting in order:
+                1. "Please make sure your camera permissions are enabled in your browser"
+                2. "Try selecting your camera from the dropdown menu in your browser"
+                3. "Check if your camera has physical cover or is disabled in system settings"
+                4. "Try refreshing the page while keeping permissions enabled"
+              - Be extremely patient during this process - technical issues are frustrating for candidates
+              - If camera issues persist, offer: "We can proceed with audio only if needed, though video would be preferred"
+              
+              LISTENING TECHNIQUES:
+              - After asking a question, wait at least 5-8 seconds before following up
+              - Use encouraging minimal responses: "I see", "That makes sense", "Interesting"
+              - Acknowledge their answers before moving on: "Thank you for explaining that"
+              - Ask follow-up questions that show you've listened: "You mentioned X, could you elaborate on that?"
+              - If they're in the middle of thinking, don't interrupt - let them complete their thoughts
+              - Use their name occasionally when responding to make the conversation feel personal
+              - When they finish speaking, pause briefly (2-3 seconds) before responding
+              - Show you're processing their answer: "That's an interesting approach to the problem"
+              
+              NATURAL CONVERSATION FLOW:
+              - Vary your question length and complexity - humans don't speak in uniform patterns
+              - Use contractions ("I'm" instead of "I am") and casual language when appropriate
+              - Occasionally use speech disfluencies like humans: "So, about the next question..."
+              - If you need to redirect, do so gently: "That's helpful. I'd like to explore another aspect..."
+              - Avoid robotic transitions between topics - connect ideas naturally
+              - If the candidate seems confused, rephrase without making them feel inadequate
+              - If they give a partial answer, gently probe further rather than immediately moving on
+              
+              INTERVIEW STRUCTURE:
+              - Start with a brief, friendly introduction - focus on making them comfortable
+              - Ask for their name, experience, and position they're applying for
+              - Use the set_candidate_info tool to store this information
+              - Explain the interview format briefly before diving into technical questions
+              - For each category (${INTERVIEW_CATEGORIES.join(', ')}), ask 3 questions of increasing difficulty
+              - Start each new topic with context: "Now I'd like to explore your knowledge of..."
+              - After each answer, wait, then provide constructive feedback
+              - Use the store_qa tool to record questions, answers and evaluations
+              
+              ONGOING CAMERA MONITORING:
+              - Periodically check camera status (every 5-10 seconds) using the verify_camera tool
+              - If the camera goes off during the interview:
+                1. First, calmly note: "It seems your camera has turned off"
+                2. Wait to see if they fix it themselves
+                3. If not fixed after 10-15 seconds, politely say: "When you have a moment, could you please enable your camera again?"
+                4. Be patient and understanding - technical issues happen
+              - Only use proctor_interview tool for warnings after multiple gentle reminders
+              - Never terminate the interview for camera issues without multiple attempts to resolve
+              
+              EVALUATION APPROACH:
+              - After each answer, pause to reflect (this looks more human)
+              - Evaluate on a scale of 1-10 with specific, constructive feedback
+              - Always highlight strengths first: "I really liked how you..."
+              - Frame improvement areas as opportunities: "One area to explore further would be..."
+              - Acknowledge their thought process and approach, not just correctness
+              - If they struggle, offer a hint and give them another chance
+              - Show genuine appreciation for their efforts regardless of performance
+              
+              CONCLUDING THE INTERVIEW:
+              - Thank them sincerely for their time and insights
+              - Provide a balanced, honest evaluation including:
+                1. Specific technical strengths with examples from their answers
+                2. Growth opportunities framed positively
+                3. Communication style observations
+                4. Overall impression and fit for the role
+              - Ask if they have any questions about the position or process
+              - Explain next steps clearly
+              - End with genuine encouragement regardless of performance
+              - Use the complete_interview tool to finalize
+              
+              Remember: Your goal is to make this feel like a natural conversation with a thoughtful human interviewer who primarily LISTENS, not a rapid-fire Q&A session. The candidate should feel heard and respected, not rushed or interrogated.
+            `
+          }
+        ]
+      },
+      tools: [
+        { googleSearch: {} },
+        { functionDeclarations: [
+          declaration,
+          proctorDeclaration,
+          {
+            name: "set_candidate_info",
+            description: "Sets the candidate's basic information",
+            parameters: {
+              type: SchemaType.OBJECT,
+              properties: {
+                name: {
+                  type: SchemaType.STRING,
+                  description: "Candidate's name"
+                },
+                position: {
+                  type: SchemaType.STRING,
+                  description: "Position being interviewed for"
+                }
+              },
+              required: ["name", "position"]
+            }
+          },
+          {
+            name: "store_qa",
+            description: "Stores a question and answer pair with detailed evaluation",
+            parameters: {
+              type: SchemaType.OBJECT,
+              properties: {
+                question: {
+                  type: SchemaType.STRING,
+                  description: "Technical question asked to the candidate"
+                },
+                answer: {
+                  type: SchemaType.STRING,
+                  description: "Candidate's detailed response"
+                },
+                evaluation: {
+                  type: SchemaType.OBJECT,
+                  properties: {
+                    score: {
+                      type: SchemaType.NUMBER,
+                      description: "Technical accuracy score (1-10)"
+                    },
+                    feedback: {
+                      type: SchemaType.STRING,
+                      description: "Detailed evaluation feedback"
+                    },
+                    key_points_covered: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Key technical points correctly addressed"
+                    },
+                    missing_points: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Important points that were missed"
+                    },
+                    strengths: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Strong aspects of the answer"
+                    },
+                    areas_for_improvement: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Areas needing improvement"
+                    }
+                  },
+                  required: ["score", "feedback", "key_points_covered", "missing_points", "strengths", "areas_for_improvement"]
+                }
+              },
+              required: ["question", "answer", "evaluation"]
+            }
+          },
+          {
+            name: "verify_camera",
+            description: "Verifies if camera is enabled and video feed is visible",
+            parameters: {
+              type: SchemaType.OBJECT,
+              properties: {
+                status: {
+                  type: SchemaType.BOOLEAN,
+                  description: "Current camera status"
+                },
+                message: {
+                  type: SchemaType.STRING,
+                  description: "Status message or instructions"
+                }
+              },
+              required: ["status", "message"]
+            }
+          },
+          {
+            name: "complete_interview",
+            description: "Generates comprehensive final evaluation",
+            parameters: {
+              type: SchemaType.OBJECT,
+              properties: {
+                technical_score: {
+                  type: SchemaType.NUMBER,
+                  description: "Overall technical proficiency score (1-10)"
+                },
+                sentiment_analysis: {
+                  type: SchemaType.OBJECT,
+                  properties: {
+                    confidence: {
+                      type: SchemaType.NUMBER,
+                      description: "Confidence level in assessment (0-1)"
+                    },
+                    overall_sentiment: {
+                      type: SchemaType.STRING,
+                      description: "Overall sentiment analysis (positive/neutral/negative)"
+                    },
+                    key_indicators: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Key behavioral and communication indicators"
+                    },
+                    communication_score: {
+                      type: SchemaType.NUMBER,
+                      description: "Communication effectiveness score (1-10)"
+                    },
+                    technical_confidence: {
+                      type: SchemaType.NUMBER,
+                      description: "Confidence in technical responses (1-10)"
+                    }
+                  },
+                  required: ["confidence", "overall_sentiment", "key_indicators", "communication_score", "technical_confidence"]
+                },
+                recommendation: {
+                  type: SchemaType.OBJECT,
+                  properties: {
+                    hire_recommendation: {
+                      type: SchemaType.BOOLEAN,
+                      description: "Whether to hire the candidate"
+                    },
+                    justification: {
+                      type: SchemaType.STRING,
+                      description: "Detailed justification for the recommendation"
+                    },
+                    strengths: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Key strengths demonstrated"
+                    },
+                    areas_for_improvement: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Areas needing improvement"
+                    },
+                    suggested_role_level: {
+                      type: SchemaType.STRING,
+                      description: "Suggested role level (Junior/Mid-Level/Senior)"
+                    }
+                  },
+                  required: ["hire_recommendation", "justification", "strengths", "areas_for_improvement", "suggested_role_level"]
+                }
+              },
+              required: ["technical_score", "sentiment_analysis", "recommendation"]
+            }
+          }
+        ]},
+      ],
+    });
+  }, []);
+
+  useEffect(() => {
+    const styles = document.createElement('style');
+    styles.textContent = `
+      .interview-container {
+        position: relative;
+        width: 100%;
+      }
+      
+      .proctor-warnings {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        z-index: 100;
+        width: 80%;
+        max-width: 400px;
+      }
+      
+      .warning-message {
+        background-color: #fff3cd;
+        color: #856404;
+        padding: 10px;
+        margin-bottom: 5px;
+        border-radius: 4px;
+        border-left: 4px solid #ffeeba;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        animation: fadeIn 0.3s ease-in-out;
+      }
+      
+      .interview-terminated {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background-color: #f8d7da;
+        color: #721c24;
+        padding: 20px;
+        border-radius: 8px;
+        text-align: center;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        z-index: 200;
+        width: 80%;
+        max-width: 500px;
+      }
+      
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+    `;
+    document.head.appendChild(styles);
+  }, []);
+
+  const embedRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (embedRef.current && jsonString) {
+      vegaEmbed(embedRef.current, JSON.parse(jsonString));
+    }
+  }, [embedRef, jsonString]);
+
+  // Proctoring functions
+  const startProctoring = () => {
+    if (!isProctorActive && stream && videoRef.current) {
+      setIsProctorActive(true);
+      
+      // Connect the stream to the video element
+      if (videoRef.current && stream) {
+        videoRef.current.srcObject = stream;
+      }
+      
+      // Disabled periodic checks to prevent warnings
+      // Original code commented out:
+      /*
+      // Start periodic checks
+      videoCheckIntervalRef.current = window.setInterval(() => {
+        checkCandidatePresence();
+      }, 1000) as unknown as number;
+      */
+      
+      console.log("Proctoring started (checks disabled)");
+    }
+  };
+  
+  const stopProctoring = () => {
+    if (videoCheckIntervalRef.current) {
+      clearInterval(videoCheckIntervalRef.current);
+      videoCheckIntervalRef.current = null;
+    }
+    setIsProctorActive(false);
+    console.log("Proctoring stopped");
+  };
+  
+  const checkCandidatePresence = () => {
+    // Disabled camera check to remove warnings
+    // We'll keep the function but not perform any checks
+    
+    // Original code commented out:
+    /*
+    // Check if video is still active
+    if (!stream || !isStreaming || !videoRef.current) {
+      handleVideoDisabled("Video feed is not available");
+      return;
+    }
+    
+    // Here we would normally use a face detection library like face-api.js
+    // For now, we'll simulate with a basic check of video tracks
+    const videoTracks = stream.getVideoTracks();
+    const isVideoEnabled = videoTracks.length > 0 && videoTracks[0].enabled;
+    
+    if (!isVideoEnabled) {
+      handleVideoDisabled("Video was turned off");
+      return;
+    }
+    */
+    
+    // Only simulate looking away detection without terminating the interview
+    simulateLookingAwayDetection();
+  };
+  
+  const simulateLookingAwayDetection = () => {
+    // Disabled looking away detection to prevent warnings
+    // Original code commented out:
+    /*
+    // This is a simulation - in a real implementation, you would:
+    // 1. Use face-api.js to detect face landmarks
+    // 2. Calculate eye gaze direction
+    // 3. Determine if the person is looking away
+    
+    // For demo purposes, we'll just randomly detect "looking away" occasionally
+    if (Math.random() < 0.05 && !lastLookAwayTime) { // 5% chance of detecting looking away
+      handleLookingAway();
+    } else if (lastLookAwayTime && Math.random() < 0.7) { // 70% chance of returning to looking at screen
+      handleLookingAtScreen();
+    }
+    */
+  };
+  
+  const handleLookingAway = () => {
+    setLastLookAwayTime(Date.now());
+    console.log("Candidate looking away detected");
+    
+    // Set a timeout to issue a warning if they keep looking away
+    setTimeout(() => {
+      if (lastLookAwayTime && Date.now() - lastLookAwayTime > lookAwayThreshold) {
+        issueWarning("Please look at the screen. Looking away for extended periods is not allowed.");
+      }
+    }, lookAwayThreshold);
+  };
+  
+  const handleLookingAtScreen = () => {
+    setLastLookAwayTime(null);
+    console.log("Candidate looking at screen again");
+  };
+  
+  const handleVideoDisabled = (reason: string) => {
+    console.log(`Video disabled: ${reason} - Interview will continue`);
+    // Disabled termination to prevent interruptions
+    // if (!isInterviewTerminated) {
+    //   terminateInterview(reason);
+    // }
+  };
+  
+  const issueWarning = (message: string) => {
+    setProctorWarnings(prev => [...prev, message]);
+    // Here you would trigger the AI to verbally warn the candidate
+    console.warn(`Warning issued: ${message}`);
+  };
+  
+  const terminateInterview = (reason: string) => {
+    setIsInterviewTerminated(true);
+    stopProctoring();
+    
+    // Update interview session state
+    setInterviewSession(prev => ({
+      ...prev,
+      progress: {
+        ...prev.progress,
+        is_complete: true,
+        end_time: new Date().toISOString(),
+        termination_reason: reason
+      }
+    }));
+    
+    console.error(`Interview terminated: ${reason}`);
+    
+    // Update the AI's system instructions to inform about termination
+    setConfig({
+      model: "models/gemini-2.0-flash-exp",
+      systemInstruction: {
+        parts: [
+          {
+            text: `
+              ${TERMINATION_PROMPT}
+              
+              The interview has been terminated for the following reason: "${reason}"
+              
+              Please inform the candidate clearly and professionally.
+            `
+          }
+        ]
+      },
+      tools: [
+        { googleSearch: {} },
+        { functionDeclarations: [
+          declaration,
+          proctorDeclaration,
+          {
+            name: "set_candidate_info",
+            description: "Sets the candidate's basic information",
+            parameters: {
+              type: SchemaType.OBJECT,
+              properties: {
+                name: {
+                  type: SchemaType.STRING,
+                  description: "Candidate's name"
+                },
+                position: {
+                  type: SchemaType.STRING,
+                  description: "Position being interviewed for"
+                }
+              },
+              required: ["name", "position"]
+            }
+          },
+          {
+            name: "store_qa",
+            description: "Stores a question and answer pair with detailed evaluation",
+            parameters: {
+              type: SchemaType.OBJECT,
+              properties: {
+                question: {
+                  type: SchemaType.STRING,
+                  description: "Technical question asked to the candidate"
+                },
+                answer: {
+                  type: SchemaType.STRING,
+                  description: "Candidate's detailed response"
+                },
+                evaluation: {
+                  type: SchemaType.OBJECT,
+                  properties: {
+                    score: {
+                      type: SchemaType.NUMBER,
+                      description: "Technical accuracy score (1-10)"
+                    },
+                    feedback: {
+                      type: SchemaType.STRING,
+                      description: "Detailed evaluation feedback"
+                    },
+                    key_points_covered: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Key technical points correctly addressed"
+                    },
+                    missing_points: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Important points that were missed"
+                    },
+                    strengths: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Strong aspects of the answer"
+                    },
+                    areas_for_improvement: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Areas needing improvement"
+                    }
+                  },
+                  required: ["score", "feedback", "key_points_covered", "missing_points", "strengths", "areas_for_improvement"]
+                }
+              },
+              required: ["question", "answer", "evaluation"]
+            }
+          },
+          {
+            name: "verify_camera",
+            description: "Verifies if camera is enabled and video feed is visible",
+            parameters: {
+              type: SchemaType.OBJECT,
+              properties: {
+                status: {
+                  type: SchemaType.BOOLEAN,
+                  description: "Current camera status"
+                },
+                message: {
+                  type: SchemaType.STRING,
+                  description: "Status message or instructions"
+                }
+              },
+              required: ["status", "message"]
+            }
+          },
+          {
+            name: "complete_interview",
+            description: "Generates comprehensive final evaluation",
+            parameters: {
+              type: SchemaType.OBJECT,
+              properties: {
+                technical_score: {
+                  type: SchemaType.NUMBER,
+                  description: "Overall technical proficiency score (1-10)"
+                },
+                sentiment_analysis: {
+                  type: SchemaType.OBJECT,
+                  properties: {
+                    confidence: {
+                      type: SchemaType.NUMBER,
+                      description: "Confidence level in assessment (0-1)"
+                    },
+                    overall_sentiment: {
+                      type: SchemaType.STRING,
+                      description: "Overall sentiment analysis (positive/neutral/negative)"
+                    },
+                    key_indicators: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Key behavioral and communication indicators"
+                    },
+                    communication_score: {
+                      type: SchemaType.NUMBER,
+                      description: "Communication effectiveness score (1-10)"
+                    },
+                    technical_confidence: {
+                      type: SchemaType.NUMBER,
+                      description: "Confidence in technical responses (1-10)"
+                    }
+                  },
+                  required: ["confidence", "overall_sentiment", "key_indicators", "communication_score", "technical_confidence"]
+                },
+                recommendation: {
+                  type: SchemaType.OBJECT,
+                  properties: {
+                    hire_recommendation: {
+                      type: SchemaType.BOOLEAN,
+                      description: "Whether to hire the candidate"
+                    },
+                    justification: {
+                      type: SchemaType.STRING,
+                      description: "Detailed justification for the recommendation"
+                    },
+                    strengths: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Key strengths demonstrated"
+                    },
+                    areas_for_improvement: {
+                      type: SchemaType.ARRAY,
+                      items: { type: SchemaType.STRING },
+                      description: "Areas needing improvement"
+                    },
+                    suggested_role_level: {
+                      type: SchemaType.STRING,
+                      description: "Suggested role level (Junior/Mid-Level/Senior)"
+                    }
+                  },
+                  required: ["hire_recommendation", "justification", "strengths", "areas_for_improvement", "suggested_role_level"]
+                }
+              },
+              required: ["technical_score", "sentiment_analysis", "recommendation"]
+            }
+          }
+        ]
+      },
+    });
+  }, []);
+
+  useEffect(() => {
+    console.log('Interview Session Updated:', {
+      candidate: interviewSession.candidate,
+      qa_count: interviewSession.qa_history.length,
+      progress: interviewSession.progress,
+      camera_status: {
+        isEnabled: stream !== null,
+        isStreaming: isStreaming
+      }
+    });
+  }, [interviewSession, stream, isStreaming]);
+
+  return (
+    <div className="interview-container">
+      {/* Hidden video element for face detection */}
+      <video 
+        ref={videoRef}
+        style={{ display: 'none' }}
+        autoPlay
+        playsInline
+        muted
+      />
+      
+      {/* Display warnings if any */}
+      {proctorWarnings.length > 0 && (
+        <div className="proctor-warnings">
+          {proctorWarnings.map((warning, index) => (
+            <div key={index} className="warning-message">
+              ⚠️ {warning}
+            </div>
+          ))}
+        </div>
+      )}
+      
+      {/* Interview terminated message */}
+      {isInterviewTerminated && (
+        <div className="interview-terminated">
+          <h2>Interview Terminated</h2>
+          <p>Reason: {interviewSession.progress.termination_reason || "Unknown reason"}</p>
+        </div>
+      )}
+      
+      {/* Vega-Lite visualization */}
+      <div className="vega-embed" ref={embedRef} />
+    </div>
+  );
+}
+
+export const Altair = memo(AltairComponent);

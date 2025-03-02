@@ -1,0 +1,336 @@
+:root {
+  // Tezhire brand colors
+  --tezhire-primary: #14142B;
+  --tezhire-secondary: #ffffff;
+  --tezhire-accent: #4E4B66;
+  --tezhire-highlight: #6E7191;
+  --tezhire-border: #4E4B66;
+
+  --text: var(--tezhire-secondary);
+  --gray-200: #b4b8bb;
+  --gray-300: #EFF0F6;
+  --gray-500: #A0A3BD;
+  --gray-600: #6E7191;
+  --gray-700: #4E4B66;
+  --gray-800: #262338;
+  --gray-900: #14142B;
+  --gray-1000: #0a0a0a;
+  --border-stroke: var(--tezhire-border);
+  
+  --accent-blue: rgb(161, 228, 242);
+  --accent-blue-active-bg: var(--tezhire-primary);
+  --accent-blue-active: var(--tezhire-accent);
+  --accent-blue-headers: var(--tezhire-highlight);
+  --accent-green: rgb(168, 218, 181);
+
+  --midnight-blue: var(--tezhire-primary);
+  --blue-30: var(--tezhire-accent);
+
+  --accent-red: #D9214E;
+
+  --background: var(--gray-900);
+  --color: var(--text);
+
+  scrollbar-color: var(--tezhire-accent) var(--tezhire-primary);
+  scrollbar-width: thin;
+
+  /* Custom Scrollbar for Webkit browsers */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--tezhire-primary);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--tezhire-accent);
+    border-radius: 4px;
+    
+    &:hover {
+      background: var(--tezhire-highlight);
+    }
+  }
+
+  --font-family: "Space Mono", monospace;
+
+  /* Tezhire Neutral Colors */
+  --Neutral-00: var(--tezhire-primary);
+  --Neutral-5: #1A1A32;
+  --Neutral-10: #14142B;
+  --Neutral-15: #262338;
+  --Neutral-20: #4E4B66;
+  --Neutral-30: #6E7191;
+  --Neutral-50: #A0A3BD;
+  --Neutral-60: #D9DBE9;
+  --Neutral-80: #EFF0F6;
+  --Neutral-90: #FCFCFC;
+
+  --Green-500: #00BA88;
+  --Green-700: #00966D;
+
+  --Blue-500: #2F80ED;
+  --Blue-800: #2D9CDB;
+
+  --Red-400: #EB5757;
+  --Red-500: #D9214E;
+  --Red-600: #C30052;
+  --Red-700: #A60067;
+}
+
+body {
+  font-family: "Space Mono", monospace;
+  background: var(--tezhire-primary);
+  color: var(--tezhire-secondary);
+}
+
+.side-panel {
+  background: var(--Neutral-5);
+  border-color: var(--tezhire-border);
+}
+
+.streaming-console main {
+  background: var(--tezhire-primary);
+}
+
+.input-content {
+  background: var(--Neutral-15) !important;
+  border-color: var(--tezhire-border) !important;
+}
+
+.streaming-indicator {
+  background: var(--Neutral-15) !important;
+  border-color: var(--tezhire-border) !important;
+  
+  &.connected {
+    color: var(--Green-500) !important;
+  }
+}
+
+button {
+  background: var(--tezhire-accent);
+  color: var(--tezhire-secondary);
+  border-color: var(--tezhire-border);
+  
+  &:hover {
+    background: var(--Neutral-20);
+  }
+}
+
+.material-symbols-outlined {
+  &.filled {
+    font-variation-settings:
+      "FILL" 1,
+      "wght" 400,
+      "GRAD" 0,
+      "opsz" 24;
+  }
+}
+
+.space-mono-regular {
+  font-family: "Space Mono", monospace;
+  font-weight: 400;
+  font-style: normal;
+}
+
+.space-mono-bold {
+  font-family: "Space Mono", monospace;
+  font-weight: 700;
+  font-style: normal;
+}
+
+.space-mono-regular-italic {
+  font-family: "Space Mono", monospace;
+  font-weight: 400;
+  font-style: italic;
+}
+
+.space-mono-bold-italic {
+  font-family: "Space Mono", monospace;
+  font-weight: 700;
+  font-style: italic;
+}
+
+.hidden {
+  display: none;
+}
+
+.flex {
+  display: flex;
+}
+
+.h-screen-full {
+  height: 100vh;
+}
+
+.w-screen-full {
+  width: 100vw;
+}
+
+.flex-col {
+  flex-direction: column;
+}
+
+@media (prefers-reduced-motion: no-preference) {}
+
+.streaming-console {
+  background: var(--tezhire-primary);
+  color: var(--tezhire-secondary);
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  font-family: var(--font-family);
+  position: relative;
+
+  &::before {
+    content: 'Tezhire Interview Bot';
+    position: absolute;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--tezhire-secondary);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    opacity: 0.95;
+    padding: 10px 20px;
+    border-bottom: 2px solid var(--tezhire-accent);
+    background: linear-gradient(180deg, var(--Neutral-10) 0%, var(--tezhire-primary) 100%);
+    border-radius: 4px;
+  }
+
+  a,
+  a:visited,
+  a:active {
+    color: var(--tezhire-secondary);
+    text-decoration: none;
+    
+    &:hover {
+      color: var(--tezhire-highlight);
+    }
+  }
+
+  .disabled {
+    pointer-events: none;
+
+    >* {
+      pointer-events: none;
+    }
+  }
+
+  main {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex-grow: 1;
+    gap: 1rem;
+    max-width: 100%;
+    overflow: hidden;
+  }
+
+  .main-app-area {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .function-call {
+    position: absolute;
+    top: 0;
+    width: 100%;
+    height: 50%;
+    overflow-y: auto;
+  }
+}
+
+/* video player */
+.stream {
+  flex-grow: 1;
+  max-width: 90%;
+  border-radius: 32px;
+  max-height: fit-content;
+}
+
+.App {
+  text-align: center;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.error-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  padding: 20px;
+  background-color: #f8f9fa;
+  
+  h1 {
+    color: #dc3545;
+    margin-bottom: 20px;
+  }
+
+  p {
+    margin: 10px 0;
+    font-size: 16px;
+  }
+
+  pre {
+    background-color: #f1f1f1;
+    padding: 15px;
+    border-radius: 5px;
+    margin: 10px 0;
+    font-family: monospace;
+  }
+}
+
+.error-message {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background-color: #dc3545;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 5px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+}
+
+.streaming-console {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.main-app-area {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.stream {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+
+  &.hidden {
+    display: none;
+  }
+}
